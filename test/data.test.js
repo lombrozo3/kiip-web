@@ -7,7 +7,7 @@ const link = (id, content, extra = {}) => ({ id, type: "LINK", content, time: 10
 test("takes each field from the device that changed it last", () => {
   const phone = link("a", "https://a.com", { title: "New", note: "Old", fieldTimes: { title: 5, note: 1 } });
   const tablet = link("a", "https://a.com", { title: "Old", note: "New", fieldTimes: { title: 1, note: 5 } });
-  const [item] = KiipData.merged([{ items: [phone] }, { items: [tablet] }]);
+  const [item] = KiipData.merged([{ items: [phone] }, { items: [tablet] }]).items;
   assert.equal(item.title, "New");
   assert.equal(item.note, "New");
   assert.deepEqual(item.fieldTimes, { title: 5, note: 5 });
@@ -16,20 +16,79 @@ test("takes each field from the device that changed it last", () => {
 test("merging either way round gives the same fields", () => {
   const one = link("a", "https://a.com", { title: "One" });
   const two = link("a", "https://a.com", { title: "Two" });
-  assert.equal(KiipData.merged([{ items: [one] }, { items: [two] }])[0].title,
-    KiipData.merged([{ items: [two] }, { items: [one] }])[0].title);
+  assert.equal(KiipData.merged([{ items: [one] }, { items: [two] }]).items[0].title,
+    KiipData.merged([{ items: [two] }, { items: [one] }]).items[0].title);
+});
+
+test("the archive field's changes are read from the name the app records them under", () => {
+  const phone = link("a", "https://a.com", { archiveChecked: 5, fieldTimes: { archiveTried: 9 } });
+  const other = link("a", "https://a.com", { archiveChecked: 0, fieldTimes: { archiveTried: 1 } });
+  assert.equal(KiipData.merged([{ items: [other] }, { items: [phone] }]).items[0].archiveChecked, 5);
+  assert.equal(KiipData.merged([{ items: [phone] }, { items: [other] }]).items[0].archiveChecked, 5);
+});
+
+test("recorded deletions are kept, for writing back", () => {
+  const { deletions } = KiipData.merged([
+    { items: [], deletions: [{ id: "a", time: 3 }] },
+    { items: [], deletions: [{ id: "a", time: 9 }, { id: "b", time: 1 }] },
+  ]);
+  assert.deepEqual(deletions, [{ id: "a", time: 9 }, { id: "b", time: 1 }]);
+});
+
+test("a new link has every field a device's copy has, and notes what was set", () => {
+  const item = KiipData.newItem("  https://a.com/x  ", ["x"], " Mine ", 50, "id1");
+  assert.equal(item.type, "LINK");
+  assert.equal(item.content, "https://a.com/x");
+  assert.equal(item.note, "Mine");
+  assert.equal(item.previewTried, false);
+  assert.deepEqual(item.fieldTimes, { content: 50, time: 50, tags: 50, note: 50 });
+  assert.deepEqual(Object.keys(item).sort(), [
+    "archiveChecked", "collection", "content", "dateTried", "description", "fieldTimes", "gone", "height", "id",
+    "imageUrl", "kept", "language", "linkChecked", "note", "previewTried", "published", "siteName", "summarized",
+    "summary", "tags", "time", "title", "trashedAt", "type", "width",
+  ]);
+});
+
+test("anything that isn't a single web address is saved as text", () => {
+  assert.equal(KiipData.newItem("Some words", [], "", 1, "a").type, "TEXT");
+  assert.equal(KiipData.newItem("see https://a.com", [], "", 1, "a").type, "TEXT");
+  assert.equal(KiipData.newItem("javascript:alert(1)", [], "", 1, "a").type, "TEXT");
+});
+
+test("an edit only marks the fields that changed", () => {
+  const item = link("a", "https://a.com", { note: "Old", tags: ["x"], fieldTimes: { note: 1, title: 2 } });
+  const changed = KiipData.edited(item, { note: "New", tags: ["x"] }, 50);
+  assert.equal(changed.note, "New");
+  assert.deepEqual(changed.fieldTimes, { note: 50, title: 2 });
+  assert.equal(item.note, "Old");
+});
+
+test("an edit on the site wins over the older value on a device", () => {
+  const phone = link("a", "https://a.com", { note: "Phone", fieldTimes: { note: 5 } });
+  const web = KiipData.edited(phone, { note: "Web" }, 9);
+  assert.equal(KiipData.merged([{ items: [phone] }, { items: [web] }]).items[0].note, "Web");
+});
+
+test("tags are tidied and use the library's spelling", () => {
+  assert.deepEqual(KiipData.parseTags(" #bangkok, Food,, food ,##New", ["Bangkok"]), ["Bangkok", "Food", "New"]);
+});
+
+test("what is already saved is found, but not among images", () => {
+  const items = [link("a", "https://a.com"), { id: "b", type: "IMAGE", content: "p.jpg" }];
+  assert.equal(KiipData.saved(items, " https://a.com ").id, "a");
+  assert.equal(KiipData.saved(items, "p.jpg"), undefined);
 });
 
 test("only a recorded deletion removes an item", () => {
   const items = [link("a", "https://a.com"), link("b", "https://b.com")];
-  assert.equal(KiipData.merged([{ items }, { items: [] }]).length, 2);
-  assert.deepEqual(KiipData.merged([{ items }, { items: [], deletions: [{ id: "a", time: 9 }] }]).map((i) => i.id), ["b"]);
+  assert.equal(KiipData.merged([{ items }, { items: [] }]).items.length, 2);
+  assert.deepEqual(KiipData.merged([{ items }, { items: [], deletions: [{ id: "a", time: 9 }] }]).items.map((i) => i.id), ["b"]);
 });
 
 test("the same link on two devices becomes one, with both sets of tags", () => {
   const first = link("b", "https://a.com", { tags: ["x"], fieldTimes: { content: 3 } });
   const second = link("a", "https://a.com", { tags: ["y"], fieldTimes: { content: 4 } });
-  const items = KiipData.merged([{ items: [first] }, { items: [second] }]);
+  const { items } = KiipData.merged([{ items: [first] }, { items: [second] }]);
   assert.equal(items.length, 1);
   assert.equal(items[0].id, "a");
   assert.deepEqual(items[0].tags.sort(), ["x", "y"]);
@@ -37,7 +96,7 @@ test("the same link on two devices becomes one, with both sets of tags", () => {
 
 test("the same image on two devices stays two", () => {
   const image = (id) => ({ id, type: "IMAGE", content: "photo.jpg", time: 1, tags: [], fieldTimes: {} });
-  assert.equal(KiipData.merged([{ items: [image("a")] }, { items: [image("b")] }]).length, 2);
+  assert.equal(KiipData.merged([{ items: [image("a")] }, { items: [image("b")] }]).items.length, 2);
 });
 
 test("sites ignore www and the like, and redd.it counts as Reddit", () => {

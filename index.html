@@ -20,6 +20,9 @@
   </svg>
   <div class="bar-tools" id="tools" hidden>
     <input id="search" type="search" placeholder="Search" aria-label="Search your library">
+    <button id="add" type="button">Add</button>
+    <span id="save-status" class="save-status" role="status"></span>
+    <button id="save-action" class="quiet" type="button" hidden></button>
     <label class="sort-label">Sort
       <select id="sort">
         <option value="newest-saved">Newest saved</option>
@@ -59,5 +62,11 @@
 </main>
 
 <dialog id="sheet" class="sheet" aria-label="Saved item"></dialog>
+
+<div id="toast" class="toast" role="status" hidden>
+  <span id="toast-text"></span>
+  <button id="toast-action" class="quiet" type="button" hidden>Undo</button>
+</div>
+<datalist id="all-tags"></datalist>
 </body>
 </html>

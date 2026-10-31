@@ -1,7 +1,8 @@
 /**
  * The library's data, with no page or network in it: merging the copies each
- * device keeps in Drive, and working out what to show. The merge follows
- * Changes.kt in the Android app, so the site shows what a device would.
+ * device keeps in Drive, making changes to it, and working out what to show.
+ * The merge follows Changes.kt in the Android app, so the site acts as one
+ * more device, and items are written in the same form as Library.kt's.
  */
 const KiipData = (() => {
   const FIELDS = [
@@ -12,6 +13,11 @@ const KiipData = (() => {
   ];
   const HOST_PREFIX = /^(www\d?|m|mobile|amp|old|new|np)\./;
   const MIN_SITE_ITEMS = 2;
+  const SNAPSHOT_VERSION = 1;
+  const MAX_TEXT = 200000;
+
+  /** The name a field's changes are recorded under. One differs from how the field is stored. */
+  const timeKey = (field) => (field === "archiveChecked" ? "archiveTried" : field);
 
   /** [mine], taking each field from whichever of it and [theirs] changed it last. */
   function mergedItem(mine, theirs) {
@@ -19,8 +25,8 @@ const KiipData = (() => {
     const myTimes = mine.fieldTimes || {};
     const theirTimes = theirs.fieldTimes || {};
     for (const field of FIELDS) {
-      const myTime = myTimes[field] || 0;
-      const theirTime = theirTimes[field] || 0;
+      const myTime = myTimes[timeKey(field)] || 0;
+      const theirTime = theirTimes[timeKey(field)] || 0;
       const theirsWins = theirTime > myTime ||
         (theirTime === myTime && String(theirs[field]) > String(mine[field]));
       if (theirsWins) merged[field] = theirs[field];
@@ -63,7 +69,58 @@ const KiipData = (() => {
         deletions.set(drop.id, Math.max(deletions.get(drop.id) || 0, ...Object.values(drop.fieldTimes || {}), 0));
       }
     }
-    return [...items.values()].filter((item) => !deletions.has(item.id));
+    return {
+      items: [...items.values()].filter((item) => !deletions.has(item.id)).sort((a, b) => b.time - a.time),
+      deletions: [...deletions].map(([id, time]) => ({ id, time })),
+    };
+  }
+
+  /** The library as a device's copy in Drive holds it. */
+  function snapshot(library) {
+    return { version: SNAPSHOT_VERSION, items: library.items, deletions: library.deletions };
+  }
+
+  /** [item] with [changes] made to it, each changed field noted as changed at [now]. */
+  function edited(item, changes, now) {
+    const fieldTimes = { ...item.fieldTimes };
+    for (const [field, value] of Object.entries(changes)) {
+      if (JSON.stringify(item[field]) !== JSON.stringify(value)) fieldTimes[timeKey(field)] = now;
+    }
+    return { ...item, ...changes, fieldTimes };
+  }
+
+  /**
+   * A new link or text item, with every field a device's copy has. A link's title
+   * and preview come later from the phone, as a web page can't fetch other sites.
+   */
+  function newItem(text, tags, note, now, id) {
+    const content = text.trim();
+    const link = !/\s/.test(content) && webAddress(content) !== null;
+    const blank = {
+      id, type: link ? "LINK" : "TEXT", content: "", time: 0, title: "", description: "", imageUrl: "",
+      width: 0, height: 0, previewTried: false, collection: "", tags: [], published: 0, dateTried: false,
+      trashedAt: 0, note: "", linkChecked: false, gone: false, siteName: "", archiveChecked: 0,
+      summary: "", kept: 0, summarized: 0, language: "", fieldTimes: {},
+    };
+    return edited(blank, { content: link ? content : content.slice(0, MAX_TEXT), time: now, tags, note: note.trim() }, now);
+  }
+
+  /** Tags typed with commas between them, using the library's spelling where only the case differs. */
+  function parseTags(text, libraryTags) {
+    const tags = [];
+    for (const typed of text.split(/[,\n]/)) {
+      const tag = typed.trim().replace(/^#+/, "").trim();
+      if (!tag) continue;
+      const spelled = libraryTags.find((known) => known.toLowerCase() === tag.toLowerCase()) || tag;
+      if (!tags.some((known) => known.toLowerCase() === spelled.toLowerCase())) tags.push(spelled);
+    }
+    return tags;
+  }
+
+  /** The item already holding this link or text, if there is one. */
+  function saved(items, text) {
+    const content = text.trim();
+    return items.find((item) => item.type !== "IMAGE" && item.content === content);
   }
 
   /** Which website a link is from, as "theguardian.com", or null for others. */
@@ -155,7 +212,7 @@ const KiipData = (() => {
     };
   }
 
-  return { merged, siteOf, webAddress, archiveUrl, matches, sorted, facets };
+  return { merged, snapshot, edited, newItem, parseTags, saved, siteOf, webAddress, archiveUrl, matches, sorted, facets };
 })();
 
 if (typeof module !== "undefined") module.exports = KiipData;

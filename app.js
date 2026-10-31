@@ -1,13 +1,18 @@
 /**
  * The page: signs in, reads every device's copy of the library from the
- * "Kiip Library" folder in Drive, and shows it. It only ever reads: nothing
- * here writes to Drive, so devices can't be affected by it.
+ * "Kiip Library" folder in Drive, and shows it. It is one more device: its
+ * changes go in its own copy, which the others merge in. Only a recorded
+ * deletion removes an item, and it never records one of its own.
  */
 const CLIENT_ID = "220913567746-at8pnnej1esfl0ulf9s07eim289ptun0.apps.googleusercontent.com";
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const DRIVE = "https://www.googleapis.com/drive/v3";
+const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER = "Kiip Library";
 const COPY = /^device-.*\.json$/;
+const WEB_COPY = "device-web.json";
+const SAVE_DELAY_MS = 1000;
+const TOAST_MS = 6000;
 const IMAGE_PREFIX = "image-";
 const TOKEN_KEY = "kiip-token";
 const PAGE_SIZE = 60;
@@ -23,6 +28,12 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   items: [],
+  deletions: [],
+  folder: null,
+  webCopy: null, // Drive's file id for this site's own copy, once it has one
+  dirty: false, // there are changes here that aren't in Drive yet
+  saving: false,
+  saveAgain: false,
   images: new Map(), // Drive's file id for each saved image, by its name
   imageUrls: new Map(), // a loaded image's address in this page, by its name
   shown: [],
@@ -86,6 +97,9 @@ function signIn() {
 }
 
 function signOut() {
+  if (state.dirty && !window.confirm("Some changes haven't been saved yet. Sign out and lose them?")) return;
+  state.dirty = false;
+  setSaveStatus("");
   forgetToken();
   state.imageUrls.forEach((url) => URL.revokeObjectURL(url));
   state.imageUrls.clear();
@@ -103,14 +117,24 @@ function showWelcome(message) {
 
 // ---- Drive -----------------------------------------------------------------
 
-async function drive(path) {
-  const response = await fetch(`${DRIVE}/${path}`, { headers: { Authorization: `Bearer ${state.token}` } });
+async function request(url, options = {}) {
+  const headers = { ...options.headers, Authorization: `Bearer ${state.token}` };
+  const response = await fetch(url, { ...options, headers });
   if (response.ok) return response;
   if (response.status === 401) throw new SignInNeeded();
-  throw new Error(`Drive said ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  throw new DriveError(response.status, `Drive said ${response.status}: ${(await response.text()).slice(0, 300)}`);
 }
 
+const drive = (path) => request(`${DRIVE}/${path}`);
+
 class SignInNeeded extends Error {}
+
+class DriveError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
 
 async function listFolder(folder) {
   const files = [];
@@ -132,25 +156,39 @@ async function findFolder() {
   return (await response.json()).files[0]?.id;
 }
 
+/** Every device's copy from Drive, as they are now, and all the files in the folder. */
+async function readCopies() {
+  const files = await listFolder(state.folder);
+  const copies = files.filter((file) => COPY.test(file.name));
+  const read = await Promise.allSettled(copies.map(async (file) => (await drive(`files/${file.id}?alt=media`)).json()));
+  const failed = read.find((result) => result.status === "rejected" && result.reason instanceof SignInNeeded);
+  if (failed) throw failed.reason;
+  const readable = read.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  if (readable.length === 0) throw new Error("No device's copy of the library could be read.");
+  state.webCopy = files.find((file) => file.name === WEB_COPY)?.id || null;
+  return { files, copies: readable };
+}
+
+/** What Drive has, with any changes here that it hasn't got yet. */
+function brought(copies) {
+  const library = KiipData.merged(state.dirty ? [...copies, { items: state.items, deletions: state.deletions }] : copies);
+  state.items = library.items;
+  state.deletions = library.deletions;
+  return library;
+}
+
 async function load() {
   $("message").textContent = "Reading your library…";
   $("sign-in").hidden = true;
   try {
-    const folder = await findFolder();
-    if (!folder) {
+    state.folder = await findFolder();
+    if (!state.folder) {
       $("sign-in").hidden = false;
       showWelcome(`Couldn't find the "${FOLDER}" folder for this account. Check you chose the account that syncs on your phone.`);
       return;
     }
-    const files = await listFolder(folder);
-    const copies = files.filter((file) => COPY.test(file.name));
-    const read = await Promise.allSettled(copies.map(async (file) => (await drive(`files/${file.id}?alt=media`)).json()));
-    const failed = read.find((result) => result.status === "rejected" && result.reason instanceof SignInNeeded);
-    if (failed) throw failed.reason;
-    const readable = read.filter((result) => result.status === "fulfilled").map((result) => result.value);
-    if (readable.length === 0) throw new Error("No device's copy of the library could be read.");
-
-    state.items = KiipData.merged(readable);
+    const { files, copies } = await readCopies();
+    brought(copies);
     state.images = new Map(files.filter((file) => file.name.startsWith(IMAGE_PREFIX))
       .map((file) => [file.name.slice(IMAGE_PREFIX.length), file.id]));
     $("sign-in").hidden = false;
@@ -158,6 +196,7 @@ async function load() {
     $("library").hidden = false;
     $("tools").hidden = false;
     show();
+    if (state.dirty) save();
   } catch (error) {
     $("sign-in").hidden = false;
     if (error instanceof SignInNeeded) {
@@ -168,6 +207,110 @@ async function load() {
       showWelcome(`Couldn't read your library. ${error.message}`);
     }
   }
+}
+
+/** Puts [library] in this site's own copy in Drive, making that the first time. */
+async function writeCopy(library) {
+  const body = JSON.stringify(KiipData.snapshot(library));
+  const json = { "Content-Type": "application/json" };
+  if (state.webCopy) {
+    try {
+      await request(`${UPLOAD}/files/${state.webCopy}?uploadType=media&fields=id`, { method: "PATCH", headers: json, body });
+      return;
+    } catch (error) {
+      if (!(error instanceof DriveError) || error.code !== 404) throw error;
+    }
+  }
+  const boundary = crypto.randomUUID();
+  const metadata = JSON.stringify({ name: WEB_COPY, parents: [state.folder] });
+  const multipart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${boundary}--\r\n`;
+  const response = await request(`${UPLOAD}/files?uploadType=multipart&fields=id`, {
+    method: "POST",
+    headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+    body: multipart,
+  });
+  state.webCopy = (await response.json()).id;
+}
+
+/**
+ * Sends what has changed here to Drive. The other devices' copies are read again first,
+ * so what this writes has everything in it, and it can't undo their newer changes.
+ */
+async function save() {
+  clearTimeout(saveTimer);
+  if (state.saving) {
+    state.saveAgain = true;
+    return;
+  }
+  state.saving = true;
+  setSaveStatus("Saving…");
+  try {
+    do {
+      state.saveAgain = false;
+      const { copies } = await readCopies();
+      const library = brought(copies);
+      state.dirty = false;
+      await writeCopy(library);
+    } while (state.saveAgain);
+    setSaveStatus("Saved");
+  } catch (error) {
+    state.dirty = true;
+    console.error(error);
+    if (error instanceof SignInNeeded) {
+      forgetToken();
+      setSaveStatus("Sign in again to save your changes", "Sign in", signIn);
+    } else {
+      setSaveStatus("Couldn't save your changes", "Try again", save);
+    }
+  } finally {
+    state.saving = false;
+  }
+}
+
+let saveTimer;
+
+/** Notes that something changed here, and saves soon, gathering quick changes into one save. */
+function changed() {
+  state.dirty = true;
+  state.saveAgain = state.saving;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, SAVE_DELAY_MS);
+  setSaveStatus("Saving…");
+}
+
+function setSaveStatus(text, action, onAction) {
+  const status = $("save-status");
+  status.textContent = text;
+  status.classList.toggle("problem", Boolean(action));
+  const button = $("save-action");
+  button.hidden = !action;
+  button.textContent = action || "";
+  button.onclick = onAction || null;
+}
+
+function replaceItem(id, changes) {
+  const item = state.items.find((other) => other.id === id);
+  if (!item) return null;
+  const updated = KiipData.edited(item, changes, Date.now());
+  state.items = state.items.map((other) => (other.id === id ? updated : other));
+  changed();
+  return updated;
+}
+
+let toastTimer;
+
+function toast(text, undo) {
+  $("toast-text").textContent = text;
+  const action = $("toast-action");
+  action.hidden = !undo;
+  action.onclick = undo ? () => {
+    $("toast").hidden = true;
+    undo();
+  } : null;
+  $("toast").hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, TOAST_MS);
 }
 
 /** Fills [element] with a saved image, which has to be fetched from Drive with the sign-in. */
@@ -270,6 +413,115 @@ function card(item) {
   return button;
 }
 
+/** A labelled text box, with an optional hint under it. */
+function field(label, control, hint) {
+  const box = el("label", "field", label);
+  box.append(control);
+  if (hint) box.append(el("span", "field-hint", hint));
+  return box;
+}
+
+function tagsInput(tags) {
+  const input = el("input");
+  input.value = tags.join(", ");
+  input.setAttribute("list", "all-tags");
+  input.autocomplete = "off";
+  return input;
+}
+
+function textBox(value, rows) {
+  const box = el("textarea");
+  box.value = value;
+  box.rows = rows;
+  return box;
+}
+
+function libraryTags() {
+  return KiipData.facets(state.items).tags.map((tag) => tag.key);
+}
+
+function suggestTags() {
+  $("all-tags").replaceChildren(...libraryTags().map((tag) => {
+    const option = el("option");
+    option.value = tag;
+    return option;
+  }));
+}
+
+function sheetButton(text, className, onClick) {
+  const button = el("button", className, text);
+  button.type = "button";
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+/** Saves something new: a link if it's a web address, otherwise text. */
+function openAdd() {
+  suggestTags();
+  const sheet = $("sheet");
+  const body = el("div", "sheet-body");
+  const content = textBox("", 4);
+  const tags = tagsInput([]);
+  const note = textBox("", 2);
+  body.append(el("h2", null, "Add to Kiip"), field("Link or text", content), field("Tags", tags, "Separate tags with commas."), field("Note", note));
+
+  const actions = el("div", "sheet-actions");
+  actions.append(
+    sheetButton("Cancel", "quiet", () => sheet.close()),
+    sheetButton("Save", null, () => {
+      if (!content.value.trim()) {
+        content.focus();
+        return;
+      }
+      const existing = KiipData.saved(state.items, content.value);
+      sheet.close();
+      if (existing) {
+        toast("That's already saved.");
+        openSheet(existing);
+        return;
+      }
+      const item = KiipData.newItem(content.value, KiipData.parseTags(tags.value, libraryTags()), note.value, Date.now(), crypto.randomUUID());
+      state.items = [item, ...state.items];
+      changed();
+      show();
+      toast(item.type === "LINK" ? "Saved. Its title and picture come from your phone when Kiip next syncs there." : "Saved.");
+    }),
+  );
+  sheet.replaceChildren(body, actions);
+  sheet.showModal();
+  content.focus();
+}
+
+/** Changes an item's tags and note. */
+function openEdit(item) {
+  suggestTags();
+  const sheet = $("sheet");
+  const body = el("div", "sheet-body");
+  const tags = tagsInput(item.tags || []);
+  const note = textBox(item.note || "", 4);
+  body.append(el("h2", null, item.title || (item.type === "IMAGE" ? "Saved image" : item.content)),
+    field("Tags", tags, "Separate tags with commas."), field("Note", note));
+
+  const actions = el("div", "sheet-actions");
+  actions.append(
+    sheetButton("Cancel", "quiet", () => openSheet(item)),
+    sheetButton("Save", null, () => {
+      const updated = replaceItem(item.id, { tags: KiipData.parseTags(tags.value, libraryTags()), note: note.value.trim() });
+      show(true);
+      if (updated) openSheet(updated);
+      else sheet.close();
+    }),
+  );
+  sheet.replaceChildren(body, actions);
+  if (!sheet.open) sheet.showModal();
+  note.focus();
+}
+
+function setTrashed(item, trashedAt) {
+  replaceItem(item.id, { trashedAt });
+  show(true);
+}
+
 function openSheet(item) {
   const sheet = $("sheet");
   const body = el("div", "sheet-body");
@@ -314,16 +566,30 @@ function openSheet(item) {
   }
 
   const actions = el("div", "sheet-actions");
-  const close = el("button", "quiet", "Close");
-  close.type = "button";
-  close.addEventListener("click", () => sheet.close());
-  actions.append(close);
+  if (item.trashedAt) {
+    actions.append(sheetButton("Restore", "quiet", () => {
+      sheet.close();
+      setTrashed(item, 0);
+      toast("Restored.");
+    }));
+  } else {
+    actions.append(sheetButton("Move to trash", "danger", () => {
+      sheet.close();
+      const { trashedAt } = item;
+      setTrashed(item, Date.now());
+      toast("Moved to the trash.", () => setTrashed(item, trashedAt));
+    }));
+  }
+  actions.append(
+    sheetButton("Edit", "quiet", () => openEdit(state.items.find((other) => other.id === item.id) || item)),
+    sheetButton("Close", "quiet", () => sheet.close()),
+  );
   if (address) {
     if (item.gone) actions.append(linkAction("Archived copy", KiipData.archiveUrl(item)));
     actions.append(linkAction(item.gone ? "Open anyway" : "Open", address));
   }
   sheet.append(body, actions);
-  sheet.showModal();
+  if (!sheet.open) sheet.showModal();
   sheet.scrollTop = 0;
 }
 
@@ -397,7 +663,10 @@ function drawMore() {
   }
 }
 
-function show() {
+/** Draws the library as filtered and sorted now; with [keepPlace], without moving the reader. */
+function show(keepPlace = false) {
+  const drawn = state.drawn;
+  const place = window.scrollY;
   state.shown = KiipData.sorted(
     state.items.filter((item) => KiipData.matches(item, {
       view: state.view,
@@ -412,7 +681,12 @@ function show() {
   drawFilters();
   resetColumns();
   drawMore();
-  window.scrollTo(0, 0);
+  if (keepPlace) {
+    while (state.drawn < Math.min(drawn, state.shown.length)) drawMore();
+    window.scrollTo(0, place);
+  } else {
+    window.scrollTo(0, 0);
+  }
 }
 
 new IntersectionObserver((entries) => {
@@ -428,6 +702,10 @@ $("sort").addEventListener("change", show);
 $("sign-in").addEventListener("click", signIn);
 $("sign-out").addEventListener("click", signOut);
 $("refresh").addEventListener("click", load);
+$("add").addEventListener("click", openAdd);
+window.addEventListener("beforeunload", (event) => {
+  if (state.dirty || state.saving) event.preventDefault();
+});
 $("sheet").addEventListener("click", (event) => {
   if (event.target === $("sheet")) $("sheet").close();
 });
