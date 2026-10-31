@@ -291,6 +291,61 @@ button.danger:hover { background: var(--surface-2); }
 .save-status { color: var(--ink-2); font-size: 14px; }
 .save-status.problem { color: var(--warn); font-weight: 600; }
 
+/* Reading aloud */
+
+.card-box { position: relative; }
+.card-box .card-meta { padding-right: 34px; }
+
+.card-read {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 18px;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.card-read:hover { background: var(--surface-2); color: var(--ink); }
+.card-read svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+body.listening { padding-bottom: 150px; }
+
+.player {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 10px 24px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.player-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.player-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.player-note { flex: none; color: var(--ink-2); font-size: 13px; }
+.player-seek { display: block; width: 100%; margin: 6px 0; accent-color: var(--accent); }
+.player-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.player-option { display: flex; align-items: center; gap: 6px; margin-left: 10px; color: var(--ink-2); font-size: 14px; }
+
+.player-option select {
+  max-width: 190px;
+  min-height: 36px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+body.listening .toast { bottom: 150px; }
+
 .toast {
   position: fixed;
   left: 50%;
@@ -318,4 +373,8 @@ button.danger:hover { background: var(--surface-2); }
   #views .filter { width: auto; }
   #sites, #tags { max-height: 240px; overflow-y: auto; }
   .sort-label { margin-left: 0; }
+  .player { padding: 8px 16px 10px; }
+  .player-option { margin-left: 0; }
+  body.listening { padding-bottom: 200px; }
+  body.listening .toast { bottom: 200px; }
 }

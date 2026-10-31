@@ -15,6 +15,8 @@ const KiipData = (() => {
   const MIN_SITE_ITEMS = 2;
   const SNAPSHOT_VERSION = 1;
   const MAX_TEXT = 200000;
+  // Speech in browsers can stop partway through long pieces, and short ones resume closer to where they stopped.
+  const CHUNK_LENGTH = 180;
 
   /** The name a field's changes are recorded under. One differs from how the field is stored. */
   const timeKey = (field) => (field === "archiveChecked" ? "archiveTried" : field);
@@ -123,6 +125,56 @@ const KiipData = (() => {
     return items.find((item) => item.type !== "IMAGE" && item.content === content);
   }
 
+  function sentences(text) {
+    if (typeof Intl.Segmenter === "function") {
+      return [...new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(text)].map((part) => part.segment);
+    }
+    return text.match(/[^.!?]+[.!?]*\s*/g) || [];
+  }
+
+  /** Splits an overlong sentence at spaces. */
+  function pieces(sentence) {
+    const parts = [];
+    let rest = sentence;
+    while (rest.length > CHUNK_LENGTH) {
+      const space = rest.lastIndexOf(" ", CHUNK_LENGTH);
+      const cut = space > 0 ? space : CHUNK_LENGTH;
+      parts.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+    }
+    if (rest) parts.push(rest);
+    return parts;
+  }
+
+  /** [text] in short pieces along its sentences, for speaking one at a time. */
+  function chunks(text) {
+    const parts = [];
+    let current = "";
+    for (const sentence of sentences(text.replace(/\s+/g, " ").trim())) {
+      for (const piece of pieces(sentence.trim())) {
+        if (current && current.length + piece.length + 1 > CHUNK_LENGTH) {
+          parts.push(current);
+          current = "";
+        }
+        current = current ? `${current} ${piece}` : piece;
+      }
+    }
+    if (current) parts.push(current);
+    return parts;
+  }
+
+  /**
+   * What to read aloud for [item], given its [kept] article text if there is any,
+   * and whether that's the [whole] of it or only a summary of some kind.
+   */
+  function reading(item, kept) {
+    if (item.type === "TEXT") return { text: item.content, whole: true };
+    if (kept) return { text: item.title ? `${item.title}. ${kept}` : kept, whole: true };
+    const short = item.summary || item.description;
+    const text = [item.title, short].filter(Boolean).join(". ");
+    return { text, whole: false };
+  }
+
   /** Which website a link is from, as "theguardian.com", or null for others. */
   function siteOf(item) {
     if (item.type !== "LINK") return null;
@@ -212,7 +264,7 @@ const KiipData = (() => {
     };
   }
 
-  return { merged, snapshot, edited, newItem, parseTags, saved, siteOf, webAddress, archiveUrl, matches, sorted, facets };
+  return { merged, snapshot, edited, newItem, parseTags, saved, chunks, reading, siteOf, webAddress, archiveUrl, matches, sorted, facets };
 })();
 
 if (typeof module !== "undefined") module.exports = KiipData;

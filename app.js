@@ -14,7 +14,10 @@ const WEB_COPY = "device-web.json";
 const SAVE_DELAY_MS = 1000;
 const TOAST_MS = 6000;
 const IMAGE_PREFIX = "image-";
+const TEXT_FILE = /^text-(.+)\.txt$/;
 const TOKEN_KEY = "kiip-token";
+const SPEED_KEY = "kiip-speed";
+const VOICE_KEY = "kiip-voice";
 const PAGE_SIZE = 60;
 const CARD_WIDTH = 280;
 const FEW_FILTERS = 12;
@@ -35,6 +38,7 @@ const state = {
   saving: false,
   saveAgain: false,
   images: new Map(), // Drive's file id for each saved image, by its name
+  texts: new Map(), // Drive's file id for each article's kept text, by the item's id
   imageUrls: new Map(), // a loaded image's address in this page, by its name
   shown: [],
   drawn: 0,
@@ -98,6 +102,7 @@ function signIn() {
 
 function signOut() {
   if (state.dirty && !window.confirm("Some changes haven't been saved yet. Sign out and lose them?")) return;
+  stopReading();
   state.dirty = false;
   setSaveStatus("");
   forgetToken();
@@ -191,6 +196,8 @@ async function load() {
     brought(copies);
     state.images = new Map(files.filter((file) => file.name.startsWith(IMAGE_PREFIX))
       .map((file) => [file.name.slice(IMAGE_PREFIX.length), file.id]));
+    state.texts = new Map(files.filter((file) => TEXT_FILE.test(file.name))
+      .map((file) => [TEXT_FILE.exec(file.name)[1], file.id]));
     $("sign-in").hidden = false;
     $("welcome").hidden = true;
     $("library").hidden = false;
@@ -384,6 +391,28 @@ function savedImage(item, className) {
   if (item.width > 0 && item.height > 0) image.style.aspectRatio = `${item.width} / ${item.height}`;
   imageWatcher.observe(image);
   return image;
+}
+
+/** A card, with its Read aloud button beside rather than inside it, as buttons can't nest. */
+function cardBox(item) {
+  const box = el("div", "card-box");
+  box.append(card(item));
+  if (item.type !== "IMAGE") {
+    const read = el("button", "card-read");
+    read.type = "button";
+    read.setAttribute("aria-label", `Read aloud: ${item.title || item.content}`);
+    read.title = "Read aloud";
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("aria-hidden", "true");
+    const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    shape.setAttribute("d", "M4 10v4h4l5 4V6L8 10H4zM16.5 9a4 4 0 0 1 0 6M19 6.5a8 8 0 0 1 0 11");
+    icon.append(shape);
+    read.append(icon);
+    read.addEventListener("click", () => readAloud(item));
+    box.append(read);
+  }
+  return box;
 }
 
 function card(item) {
@@ -580,6 +609,12 @@ function openSheet(item) {
       toast("Moved to the trash.", () => setTrashed(item, trashedAt));
     }));
   }
+  if (item.type !== "IMAGE") {
+    actions.append(sheetButton("Read aloud", "quiet", () => {
+      sheet.close();
+      readAloud(item);
+    }));
+  }
   actions.append(
     sheetButton("Edit", "quiet", () => openEdit(state.items.find((other) => other.id === item.id) || item)),
     sheetButton("Close", "quiet", () => sheet.close()),
@@ -599,6 +634,161 @@ function linkAction(text, href) {
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   return link;
+}
+
+// ---- Reading aloud -----------------------------------------------------------
+
+const reader = { item: null, parts: [], index: 0, playing: false, run: 0, speaking: null };
+
+function remembered(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function remember(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Without storage, the choice lasts until the page closes.
+  }
+}
+
+/** Starts reading [item], from its kept article text if Drive has it. */
+async function readAloud(item) {
+  if (!window.speechSynthesis) {
+    toast("This browser can't read aloud.");
+    return;
+  }
+  stopReading();
+  const run = reader.run;
+  let kept = null;
+  const textFile = state.texts.get(item.id);
+  if (textFile) {
+    try {
+      kept = await (await drive(`files/${textFile}?alt=media`)).text();
+    } catch (error) {
+      console.warn("Couldn't load the article's text", error);
+    }
+    if (run !== reader.run) return;
+  }
+  const { text, whole } = KiipData.reading(item, kept);
+  const parts = KiipData.chunks(text);
+  if (parts.length === 0) {
+    toast("There's no text to read for this one.");
+    return;
+  }
+  Object.assign(reader, { item, parts, index: 0, playing: true });
+  $("player-name").textContent = item.title || item.content;
+  $("player-seek").max = parts.length - 1;
+  $("player").hidden = false;
+  document.body.classList.add("listening");
+  if (!whole) toast("Only the summary is available for this one.");
+  speak();
+}
+
+/** Speaks the current piece, and carries on to the next when it ends. */
+function speak() {
+  const run = ++reader.run;
+  speechSynthesis.cancel();
+  drawReader();
+  // Chrome can drop what is spoken straight after a cancel.
+  setTimeout(() => {
+    if (run !== reader.run) return;
+    const utterance = new SpeechSynthesisUtterance(reader.parts[reader.index]);
+    const voice = speechSynthesis.getVoices().find((other) => other.voiceURI === $("player-voice").value);
+    if (voice) utterance.voice = voice;
+    else if (reader.item.language) utterance.lang = reader.item.language;
+    utterance.rate = Number($("player-speed").value);
+    utterance.onend = () => {
+      if (run !== reader.run) return;
+      if (reader.index + 1 < reader.parts.length) {
+        reader.index++;
+        speak();
+      } else {
+        stopReading();
+      }
+    };
+    utterance.onerror = (event) => {
+      if (run !== reader.run || event.error === "interrupted" || event.error === "canceled") return;
+      console.warn("Speech failed", event.error);
+      stopReading();
+      toast("Your browser's voice stopped reading. Try another voice.");
+    };
+    reader.speaking = utterance; // Chrome can drop the end of one it no longer holds
+    speechSynthesis.speak(utterance);
+  }, 60);
+}
+
+function drawReader() {
+  $("player-seek").value = reader.index;
+  $("player-play").textContent = reader.playing ? "Pause" : "Play";
+  $("player-note").textContent = `Part ${(reader.index + 1).toLocaleString()} of ${reader.parts.length.toLocaleString()}`;
+}
+
+function pauseOrPlay() {
+  if (reader.playing) {
+    // Stopping rather than pausing, as a pause doesn't work with every browser's voices.
+    reader.playing = false;
+    reader.run++;
+    speechSynthesis.cancel();
+    drawReader();
+  } else {
+    reader.playing = true;
+    speak();
+  }
+}
+
+function goTo(index) {
+  reader.index = Math.max(0, Math.min(index, reader.parts.length - 1));
+  if (reader.playing) speak();
+  else drawReader();
+}
+
+function stopReading() {
+  reader.run++;
+  reader.playing = false;
+  reader.speaking = null;
+  if (window.speechSynthesis) speechSynthesis.cancel();
+  $("player").hidden = true;
+  document.body.classList.remove("listening");
+}
+
+function listVoices() {
+  const box = $("player-voice");
+  const chosen = box.value || remembered(VOICE_KEY) || "";
+  const options = speechSynthesis.getVoices().map((voice) => {
+    const option = el("option", null, `${voice.name} (${voice.lang})`);
+    option.value = voice.voiceURI;
+    return option;
+  });
+  const standard = el("option", null, "Default");
+  standard.value = "";
+  box.replaceChildren(standard, ...options);
+  box.value = options.some((option) => option.value === chosen) ? chosen : "";
+}
+
+function setUpReader() {
+  if (!window.speechSynthesis) return;
+  $("player-speed").value = remembered(SPEED_KEY) || "1";
+  if (!$("player-speed").value) $("player-speed").value = "1";
+  listVoices();
+  speechSynthesis.addEventListener("voiceschanged", listVoices);
+  $("player-play").addEventListener("click", pauseOrPlay);
+  $("player-back").addEventListener("click", () => goTo(reader.index - 1));
+  $("player-next").addEventListener("click", () => goTo(reader.index + 1));
+  $("player-stop").addEventListener("click", stopReading);
+  $("player-seek").addEventListener("change", (event) => goTo(Number(event.target.value)));
+  $("player-speed").addEventListener("change", (event) => {
+    remember(SPEED_KEY, event.target.value);
+    if (reader.playing) speak();
+  });
+  $("player-voice").addEventListener("change", (event) => {
+    remember(VOICE_KEY, event.target.value);
+    if (reader.playing) speak();
+  });
 }
 
 // ---- Showing the library -----------------------------------------------------
@@ -659,7 +849,7 @@ function drawMore() {
   const end = Math.min(state.drawn + PAGE_SIZE, state.shown.length);
   for (; state.drawn < end; state.drawn++) {
     const shortest = state.columns.reduce((a, b) => (b.offsetHeight < a.offsetHeight ? b : a));
-    shortest.append(card(state.shown[state.drawn]));
+    shortest.append(cardBox(state.shown[state.drawn]));
   }
 }
 
@@ -721,5 +911,6 @@ window.addEventListener("resize", () => {
   }, 200);
 });
 
+setUpReader();
 state.token = savedToken();
 if (state.token) load();

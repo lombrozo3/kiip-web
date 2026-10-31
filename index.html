@@ -63,6 +63,33 @@
 
 <dialog id="sheet" class="sheet" aria-label="Saved item"></dialog>
 
+<section id="player" class="player" aria-label="Reading aloud" hidden>
+  <div class="player-title">
+    <span id="player-name" class="player-name"></span>
+    <span id="player-note" class="player-note"></span>
+  </div>
+  <input id="player-seek" class="player-seek" type="range" min="0" value="0" step="1" aria-label="Reading position">
+  <div class="player-controls">
+    <button id="player-back" class="quiet" type="button">Back</button>
+    <button id="player-play" type="button">Pause</button>
+    <button id="player-next" class="quiet" type="button">Next</button>
+    <button id="player-stop" class="quiet" type="button">Stop</button>
+    <label class="player-option">Speed
+      <select id="player-speed">
+        <option value="0.75">0.75×</option>
+        <option value="1">1×</option>
+        <option value="1.25">1.25×</option>
+        <option value="1.5">1.5×</option>
+        <option value="1.75">1.75×</option>
+        <option value="2">2×</option>
+      </select>
+    </label>
+    <label class="player-option">Voice
+      <select id="player-voice"><option value="">Default</option></select>
+    </label>
+  </div>
+</section>
+
 <div id="toast" class="toast" role="status" hidden>
   <span id="toast-text"></span>
   <button id="toast-action" class="quiet" type="button" hidden>Undo</button>

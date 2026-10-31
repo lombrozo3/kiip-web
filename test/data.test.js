@@ -99,6 +99,37 @@ test("the same image on two devices stays two", () => {
   assert.equal(KiipData.merged([{ items: [image("a")] }, { items: [image("b")] }]).items.length, 2);
 });
 
+test("text is read in short pieces along its sentences, with nothing lost", () => {
+  const text = "First sentence here.  Second one follows!\n\nIs this the third? " + "Long words go on and on ".repeat(30);
+  const parts = KiipData.chunks(text);
+  assert.ok(parts.length > 1);
+  assert.ok(parts.every((part) => part.length > 0 && part.length <= 180));
+  assert.equal(parts.join(" ").replace(/\s+/g, ""), text.replace(/\s+/g, ""));
+  assert.ok(parts[0].startsWith("First sentence here. Second one follows!"));
+});
+
+test("a sentence with no spaces is still cut to size", () => {
+  const parts = KiipData.chunks("x".repeat(500));
+  assert.ok(parts.every((part) => part.length <= 180));
+  assert.equal(parts.join("").length, 500);
+});
+
+test("nothing to read gives no pieces", () => {
+  assert.deepEqual(KiipData.chunks("   "), []);
+});
+
+test("a link is read from its kept text, or else what short text it has", () => {
+  const item = link("a", "https://a.com", { title: "Title", summary: "Summary", description: "About" });
+  assert.deepEqual(KiipData.reading(item, "The article"), { text: "Title. The article", whole: true });
+  assert.deepEqual(KiipData.reading(item, null), { text: "Title. Summary", whole: false });
+  assert.deepEqual(KiipData.reading({ ...item, summary: "" }, null), { text: "Title. About", whole: false });
+  assert.deepEqual(KiipData.reading({ ...item, title: "", summary: "", description: "" }, null), { text: "", whole: false });
+});
+
+test("a text item is read whole", () => {
+  assert.deepEqual(KiipData.reading({ type: "TEXT", content: "Words" }, null), { text: "Words", whole: true });
+});
+
 test("sites ignore www and the like, and redd.it counts as Reddit", () => {
   assert.equal(KiipData.siteOf(link("a", "https://www.theguardian.com/x")), "theguardian.com");
   assert.equal(KiipData.siteOf(link("a", "https://old.reddit.com/r")), "reddit.com");
